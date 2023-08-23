@@ -2,10 +2,12 @@ package main
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"math"
 	"net/http"
+	"strconv"
 )
 
 // Settings for tuning database
@@ -34,10 +36,10 @@ const (
 	TNG_INNODB_IO_CAPACITY_MAX        = 2 * TNG_INNODB_IO_CAPACITY
 )
 
-// Flavor represents the input data for the tuning calculation
-type Flavor struct {
-	MemoryGB  int    `json:"memory_gb"`
-	VCPUs     int    `json:"vcpus"`
+// Configuration represents the input data for the tuning calculation
+type Configuration struct {
+	MemoryGB  string `json:"memory_gb"`
+	CPUs      int    `json:"cpus"`
 	DBType    string `json:"db_type"`
 	DBVersion string `json:"db_version"`
 }
@@ -45,7 +47,7 @@ type Flavor struct {
 // TuningConfig represents the calculated tuning parameters
 type TuningConfig struct {
 	MaxConnections        int    `json:"max_connections"`
-	InnoDBBufferPoolSize  string `json:"innodb_buffer_pool_size"`
+	InnodbBufferPoolSize  string `json:"innodb_buffer_pool_size"`
 	InnodbDedicatedServer string `json:"innodb_dedicated_server"`
 	InnodbChangeBuffering string `json:"innodb_change_buffering"`
 	SlowQueryLog          string `json:"slow_query_log"`
@@ -68,11 +70,23 @@ type TuningConfig struct {
 	ReadBufferSize        int    `json:"read_buffer_size"`
 }
 
-func calculateMySQLTuning(flavor Flavor) TuningConfig {
-	ramGB := float64(flavor.MemoryGB)
+func parseRAM(ramString string) (int, error) {
+	ramGBString := ramString[:len(ramString)-3]
+	ramGB, err := strconv.Atoi(ramGBString)
+	if err != nil {
+		return 0, errors.New("field 'memory_db' should be specified in GB, like 'X GB'. Example '1 GB'")
+	}
+	return ramGB, nil
+}
 
-	maxConnections := int(math.Floor(ramGB/TNG_RAM_HALF_AVAILABLE) * TNG_MAX_CONNECTIONS_PER_VCPU)
-	innodbBufferPoolSize := fmt.Sprintf("%.0fG", ramGB*TNG_INNODB_BUFFER_POOL_SIZE_RATIO)
+func calculateMySQLTuning(configuration Configuration) (TuningConfig, error) {
+	ramGB, err := parseRAM(configuration.MemoryGB)
+	if err != nil {
+		return TuningConfig{}, err
+	}
+
+	maxConnections := int(float64(ramGB) / TNG_RAM_HALF_AVAILABLE * TNG_MAX_CONNECTIONS_PER_VCPU)
+	innodbBufferPoolSize := fmt.Sprintf("%dG", int(math.Floor(float64(ramGB)*TNG_INNODB_BUFFER_POOL_SIZE_RATIO)))
 
 	readBufferSize := int(math.Floor(float64(ramGB) * 0.1))
 	if readBufferSize < 1 {
@@ -81,7 +95,7 @@ func calculateMySQLTuning(flavor Flavor) TuningConfig {
 
 	tuningConfig := TuningConfig{
 		MaxConnections:        maxConnections,
-		InnoDBBufferPoolSize:  innodbBufferPoolSize,
+		InnodbBufferPoolSize:  innodbBufferPoolSize,
 		InnodbDedicatedServer: TNG_INNODB_DEDICATED_SERVER,
 		InnodbChangeBuffering: TNG_INNODB_CHANGE_BUFFERING,
 		SlowQueryLog:          TNG_SLOW_QUERY_LOG,
@@ -104,26 +118,69 @@ func calculateMySQLTuning(flavor Flavor) TuningConfig {
 		ReadBufferSize:        readBufferSize,
 	}
 
-	return tuningConfig
+	return tuningConfig, nil
+}
+
+func GenerateResponseMessage(tuningConfig TuningConfig) string {
+	return fmt.Sprintf(`
+	[mysqld]
+
+	max_connections=%d
+	innodb_buffer_pool_size=%s
+	innodb_dedicated_server=%s
+	innodb_change_buffering=%s
+	slow_query_log=%s
+	long_query_time=%d
+	performance_schema=%d
+	max_allowed_packet=%s
+	table_open_cache=%d
+	thread_stack=%s
+	thread_cache_size=%d
+	join_buffer_size=%s
+	sort_buffer_size=%s
+	tmp_table_size=%s
+	max_heap_table_size=%s
+	innodb_flush_method=%s
+	innodb_file_per_table=%d
+	innodb_open_files=%d
+	innodb_io_capacity=%d
+	innodb_io_capacity_max=%d
+	read_buffer_size=%d
+
+	# Save in a file with extension .cnf in the directory /etc/mysql/conf.d/
+	# For example: /etc/mysql/conf.d/tunning_dbs.cnf`, tuningConfig.MaxConnections, tuningConfig.InnodbBufferPoolSize,
+		tuningConfig.InnodbDedicatedServer, tuningConfig.InnodbChangeBuffering, tuningConfig.SlowQueryLog,
+		tuningConfig.LongQueryTime, tuningConfig.PerformanceSchema, tuningConfig.MaxAllowedPacket,
+		tuningConfig.TableOpenCache, tuningConfig.ThreadStack, tuningConfig.ThreadCacheSize, tuningConfig.JoinBufferSize,
+		tuningConfig.SortBufferSize, tuningConfig.TmpTableSize, tuningConfig.MaxHeapTableSize,
+		tuningConfig.InnodbFlushMethod, tuningConfig.InnodbFilePerTable, tuningConfig.InnodbOpenFiles,
+		tuningConfig.InnodbIoCapacity, tuningConfig.InnodbIoCapacityMax, tuningConfig.ReadBufferSize)
 }
 
 func handleRequest(w http.ResponseWriter, r *http.Request) {
-	w.Header().Set("Content-Type", "application/json")
-
-	var flavor Flavor
-	err := json.NewDecoder(r.Body).Decode(&flavor)
+	var configuration Configuration
+	err := json.NewDecoder(r.Body).Decode(&configuration)
 	if err != nil {
+		w.Header().Set("Content-Type", "application/json")
 		http.Error(w, "Invalid JSON data", http.StatusBadRequest)
 		return
 	}
 
-	tuningConfig := calculateMySQLTuning(flavor)
-	json.NewEncoder(w).Encode(tuningConfig)
+	tuningConfig, err := calculateMySQLTuning(configuration)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+
+	responseMessage := GenerateResponseMessage(tuningConfig)
+
+	w.Header().Set("Content-Type", "text/plain")
+	fmt.Fprint(w, responseMessage)
 }
 
 func main() {
 	r := http.NewServeMux()
-	r.HandleFunc("/tune", handleRequest)
+	r.HandleFunc("/tuning", handleRequest)
 
 	fmt.Println("Listening on :8080")
 	log.Fatal(http.ListenAndServe(":8080", r))
