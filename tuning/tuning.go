@@ -2,9 +2,10 @@ package tuning
 
 import (
 	"fmt"
+	"io/ioutil"
 	"math"
-	"tuning_db/settings"
 	"tuning_db/configuration"
+	"tuning_db/settings"
 )
 
 type TuningConfig struct {
@@ -32,7 +33,7 @@ type TuningConfig struct {
 	ReadBufferSize        int    `json:"read_buffer_size"`
 }
 
-func CalculateMySQLTuning(config configuration.Configuration) (TuningConfig, error) {
+func calculateMySQLTuning(config configuration.Configuration) (TuningConfig, error) {
 	ramGB, err := configuration.ParseRAM(config.MemoryGB)
 	if err != nil {
 		return TuningConfig{}, err
@@ -72,4 +73,66 @@ func CalculateMySQLTuning(config configuration.Configuration) (TuningConfig, err
 	}
 
 	return tuningConfig, nil
+}
+
+func generateArchiveTuning(tuningConfig TuningConfig) string {
+	return fmt.Sprintf(`[mysqld]
+
+max_connections=%d
+innodb_buffer_pool_size=%s
+innodb_dedicated_server=%s
+innodb_change_buffering=%s
+slow_query_log=%s
+long_query_time=%d
+performance_schema=%d
+max_allowed_packet=%s
+table_open_cache=%d
+thread_stack=%s
+thread_cache_size=%d
+join_buffer_size=%s
+sort_buffer_size=%s
+tmp_table_size=%s
+max_heap_table_size=%s
+innodb_flush_method=%s
+innodb_file_per_table=%d
+innodb_open_files=%d
+innodb_io_capacity=%d
+innodb_io_capacity_max=%d
+read_buffer_size=%d
+
+# Save in a file with extension .cnf in the directory /etc/mysql/conf.d/
+# For example: /etc/mysql/conf.d/tuning_db.cnf
+
+# More details about variables in :https://dev.mysql.com/doc/refman/8.0/en/server-system-variables.html
+	`, tuningConfig.MaxConnections, tuningConfig.InnodbBufferPoolSize,
+		tuningConfig.InnodbDedicatedServer, tuningConfig.InnodbChangeBuffering, tuningConfig.SlowQueryLog,
+		tuningConfig.LongQueryTime, tuningConfig.PerformanceSchema, tuningConfig.MaxAllowedPacket,
+		tuningConfig.TableOpenCache, tuningConfig.ThreadStack, tuningConfig.ThreadCacheSize, tuningConfig.JoinBufferSize,
+		tuningConfig.SortBufferSize, tuningConfig.TmpTableSize, tuningConfig.MaxHeapTableSize,
+		tuningConfig.InnodbFlushMethod, tuningConfig.InnodbFilePerTable, tuningConfig.InnodbOpenFiles,
+		tuningConfig.InnodbIoCapacity, tuningConfig.InnodbIoCapacityMax, tuningConfig.ReadBufferSize)
+}
+
+func ConfigureLocalTuningDatabase(config configuration.Configuration) error {
+	tuningConfig, err := calculateMySQLTuning(config)
+	if err != nil {
+		return err
+	}
+
+	fileContent := generateArchiveTuning(tuningConfig)
+
+	fmt.Print(fileContent)
+
+	// Define o caminho completo do arquivo no diretório /etc/mysql/conf.d/
+	filePath := "./tuning_db.cnf"
+
+	// Escreve o conteúdo no arquivo
+	err = ioutil.WriteFile(filePath, []byte(fileContent), 0644)
+	if err != nil {
+		fmt.Print(err)
+		return fmt.Errorf("failed to write config file: %v", err)
+	}
+
+	fmt.Printf("Config file saved to: %s\n", filePath)
+	return nil
 }
