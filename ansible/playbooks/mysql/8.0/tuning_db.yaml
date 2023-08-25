@@ -1,0 +1,17 @@
+- name: Changes tunning dbs mysql
+  hosts: "{{ host }}"
+  remote_user: "{{ remote_user }}"
+  gather_facts: false
+  become: true
+  vars:
+    ansible_python_interpreter: /usr/bin/python3
+  tasks:
+    - name: Add archive tunning dbs
+      template:
+        src: tunning_dbs.cnf.j2
+        dest: /etc/mysql/conf.d/tuning_db.cnf
+
+    - name: Restarts database service
+      systemd:
+        name: mysql
+        state: restarted
